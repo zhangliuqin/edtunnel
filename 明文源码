@@ -1,291 +1,446 @@
-#!/usr/bin/env node
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-const http = require('http');
-const fs = require('fs');
-const axios = require('axios');
-const net = require('net');
-const path = require('path');
-const crypto = require('crypto');
-const { Buffer } = require('buffer');
-const { WebSocket, createWebSocketStream } = require('ws');
-const UUID = process.env.UUID || 'ad56186e-68db-42b5-9692-128a86046d0f'; // 节点UUID
-const DOMAIN = process.env.DOMAIN || '';    // 填写项目域名或已反代的域名，不带前缀，建议填已反代的域名
-const WSPATH = process.env.WSPATH || UUID.slice(0, 8);     // 节点路径，默认获取uuid前8位
-const SUB_PATH = process.env.SUB_PATH || 'qiangpai';            // 获取节点的订阅路径
-const NAME = process.env.NAME || '';                       // 节点名称
-const PORT = process.env.PORT || 3000;                     // http和ws服务端口
+import os, struct, hashlib, base64, asyncio
+import logging, ipaddress, aiohttp
+from aiohttp import web
 
-let uuid = UUID.replace(/-/g, ""), CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443, ISP = '';
-const DNS_SERVERS = ['8.8.4.4', '1.1.1.1'];
-const BLOCKED_DOMAINS = [
-  'speedtest.net', 'fast.com', 'speedtest.cn', 'speed.cloudflare.com', 'speedof.me',
-   'testmy.net', 'bandwidth.place', 'speed.io', 'librespeed.org', 'speedcheck.org'
-];
+# ==================== 环境变量 ====================
+UUID = os.environ.get('UUID', 'ad56186e-68db-42b5-9692-128a86046d0f')   # 节点UUID
+DOMAIN = os.environ.get('DOMAIN', '')                # 项目分配的域名或反代后的域名,不包含https://前缀,例如: domain.xxx.com
+SUB_PATH = os.environ.get('SUB_PATH', 'qiangpai')         # 节点订阅token
+NAME = os.environ.get('NAME', '')                    # 节点名称
+WSPATH = os.environ.get('WSPATH', UUID[:8])          # 节点路径
+PORT = int(os.environ.get('SERVER_PORT') or os.environ.get('PORT') or 5551)  # http和ws端口，默认自动优先获取容器分配的端口
+DEBUG = os.environ.get('DEBUG', '').lower() == 'true' # 保持默认,调试使用,true开启调试
 
-// block speedtest domains
-function isBlockedDomain(host) {
-  if (!host) return false;
-  const hostLower = host.toLowerCase();
-  return BLOCKED_DOMAINS.some(blocked => {
-    return hostLower === blocked || hostLower.endsWith('.' + blocked);
-  });
-}
+# 全局变量
+CurrentDomain = DOMAIN
+CurrentPort = 443
+Tls = 'tls'
+ISP = ''
 
-async function getisp() {
-  try {
-    const res = await axios.get('https://api.ip.sb/geoip', { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 3000 });
-    const data = res.data;
-    ISP = `${data.country_code}-${data.isp}`.replace(/ /g, '_');
-  } catch (e) {
-    try {
-      const res2 = await axios.get('http://ip-api.com/json', { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 3000 });
-      const data2 = res2.data;
-      ISP = `${data2.countryCode}-${data2.org}`.replace(/ /g, '_');
-    } catch (e2) {
-      ISP = 'Unknown';
-    }
-  }
-}
+# dns server
+DNS_SERVERS = ['8.8.4.4', '1.1.1.1']
+BLOCKED_DOMAINS = [
+    'speedtest.net', 'fast.com', 'speedtest.cn', 'speed.cloudflare.com', 'speedof.me',
+    'testmy.net', 'bandwidth.place', 'speed.io', 'librespeed.org', 'speedcheck.org'
+]
 
-async function getip() {
-  if (!DOMAIN || DOMAIN === 'your-domain.com') {
-      try {
-          const res = await axios.get('https://api-ipv4.ip.sb/ip', { timeout: 5000 });
-          const ip = res.data.trim();
-          CurrentDomain = ip, Tls = 'none', CurrentPort = PORT;
-      } catch (e) {
-          console.error('Failed to get IP', e.message);
-          CurrentDomain = 'change-your-domain.com', Tls = 'tls', CurrentPort = 443;
-      }
-  } else {
-      CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443;
-  }
-}
+# 日志级别
+log_level = logging.DEBUG if DEBUG else logging.INFO
+logging.basicConfig(
+    level=log_level,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
-// http route
-const httpServer = http.createServer(async (req, res) => {
-  if (req.url === '/') {
-    const filePath = path.join(__dirname, 'index.html');
-    fs.readFile(filePath, 'utf8', (err, content) => {
-      if (err) {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end('Hello world!');
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(content);
-    });
-    return;
-  } else if (req.url === `/${SUB_PATH}`) {
-    await getisp();await getip();
-    const namePart = NAME ? `${NAME}-${ISP}` : ISP;
-    const tlsParam = Tls === 'tls' ? 'tls' : 'none';
-    const vlsURL = `vless://${UUID}@${CurrentDomain}:${CurrentPort}?encryption=none&security=${tlsParam}&sni=${CurrentDomain}&fp=chrome&type=ws&host=${CurrentDomain}&path=%2F${WSPATH}#${namePart}`;
-    const troURL = `trojan://${UUID}@${CurrentDomain}:${CurrentPort}?security=${tlsParam}&sni=${CurrentDomain}&fp=chrome&type=ws&host=${CurrentDomain}&path=%2F${WSPATH}#${namePart}`;
-    const subscription = vlsURL + '\n' + troURL;
-    const base64Content = Buffer.from(subscription).toString('base64');
+# 禁用访问,连接等日志
+logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
+logging.getLogger('aiohttp.server').setLevel(logging.WARNING)
+logging.getLogger('aiohttp.client').setLevel(logging.WARNING)
+logging.getLogger('aiohttp.internal').setLevel(logging.WARNING)
+logging.getLogger('aiohttp.websocket').setLevel(logging.WARNING)
 
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(base64Content + '\n');
-  } else {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not Found\n');
-  }
-});
+logger = logging.getLogger(__name__)
 
-// Custom DNS
-function resolveHost(host) {
-  return new Promise((resolve, reject) => {
-    if (/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(host)) {
-      resolve(host);
-      return;
-    }
-    let attempts = 0;
-    function tryNextDNS() {
-      if (attempts >= DNS_SERVERS.length) {
-        reject(new Error(`Failed to resolve ${host} with all DNS servers`));
-        return;
-      }
-      const dnsServer = DNS_SERVERS[attempts];
-      attempts++;
-      const dnsQuery = `https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`;
-      axios.get(dnsQuery, {
-        timeout: 5000,
-        headers: {
-          'Accept': 'application/dns-json'
-        }
-      })
-        .then(response => {
-          const data = response.data;
-          if (data.Status === 0 && data.Answer && data.Answer.length > 0) {
-            const ip = data.Answer.find(record => record.type === 1);
-            if (ip) {
-              resolve(ip.data);
-              return;
-            }
-          }
-          tryNextDNS();
-        })
-        .catch(error => {
-          tryNextDNS();
-        });
-    }
 
-    tryNextDNS();
-  });
-}
+# 工具函数
+def is_blocked_domain(host: str) -> bool:
+    if not host:
+        return False
+    host_lower = host.lower()
+    return any(host_lower == blocked or host_lower.endswith('.' + blocked)
+              for blocked in BLOCKED_DOMAINS)
 
-// VLE-SS处理
-function handleVlsConnection(ws, msg) {
-  const [VERSION] = msg;
-  const id = msg.slice(1, 17);
-  if (!id.every((v, i) => v == parseInt(uuid.substr(i * 2, 2), 16))) return false;
+async def get_isp():
+    global ISP
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://api.ip.sb/geoip',
+                                 headers={'User-Agent': 'Mozilla/5.0'},
+                                 timeout=3) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    ISP = f"{data.get('country_code', '')}-{data.get('isp', '')}".replace(' ', '_')
+                    return
+    except:
+        pass
 
-  let i = msg.slice(17, 18).readUInt8() + 19;
-  const port = msg.slice(i, i += 2).readUInt16BE(0);
-  const ATYP = msg.slice(i, i += 1).readUInt8();
-  const host = ATYP == 1 ? msg.slice(i, i += 4).join('.') :
-    (ATYP == 2 ? new TextDecoder().decode(msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8())) :
-      (ATYP == 3 ? msg.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('http://ip-api.com/json',
+                                 headers={'User-Agent': 'Mozilla/5.0'},
+                                 timeout=3) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    ISP = f"{data.get('countryCode', '')}-{data.get('org', '')}".replace(' ', '_')
+                    return
+    except:
+        pass
 
-  if (isBlockedDomain(host)) {
-    ws.close();
-    return false;
-  }
-  ws.send(new Uint8Array([VERSION, 0]));
-  const duplex = createWebSocketStream(ws);
-  resolveHost(host)
-    .then(resolvedIP => {
-      net.connect({ host: resolvedIP, port }, function () {
-        this.write(msg.slice(i));
-        duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-      }).on('error', () => { });
-    })
-    .catch(error => {
-      net.connect({ host, port }, function () {
-        this.write(msg.slice(i));
-        duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-      }).on('error', () => { });
-    });
+    ISP = 'Unknown'
 
-  return true;
-}
+async def get_ip():
+    global CurrentDomain, Tls, CurrentPort
+    if not DOMAIN or DOMAIN == 'your-domain.com':
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get('https://api.ip.sb/ip', timeout=5) as resp:
+                    if resp.status == 200:
+                        ip = await resp.text()
+                        CurrentDomain = ip.strip()
+                        Tls = 'none'
+                        CurrentPort = PORT
+        except Exception as e:
+            logger.error(f'Failed to get IP: {e}')
+            CurrentDomain = 'change-your-domain.com'
+            Tls = 'tls'
+            CurrentPort = 443
+    else:
+        CurrentDomain = DOMAIN
+        Tls = 'tls'
+        CurrentPort = 443
 
-// Tro-jan处理
-function handleTrojConnection(ws, msg) {
-  try {
-    if (msg.length < 58) return false;
-    const receivedPasswordHash = msg.slice(0, 56).toString();
-    const possiblePasswords = [UUID];
+async def resolve_host(host: str) -> str:
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except:
+        pass
 
-    let matchedPassword = null;
-    for (const pwd of possiblePasswords) {
-      const hash = crypto.createHash('sha224').update(pwd).digest('hex');
-      if (hash === receivedPasswordHash) {
-        matchedPassword = pwd;
-        break;
-      }
-    }
+    for dns_server in DNS_SERVERS:
+        for rtype in ('AAAA', 'A'):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    url = f'https://dns.google/resolve?name={host}&type={rtype}'
+                    async with session.get(url, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get('Status') == 0 and data.get('Answer'):
+                                for answer in data['Answer']:
+                                    if answer.get('type') in (1, 28):   # 改过
+                                        return answer.get('data')
+            except:
+                continue
 
-    if (!matchedPassword) return false;
-    let offset = 56;
-    if (msg[offset] === 0x0d && msg[offset + 1] === 0x0a) {
-      offset += 2;
-    }
+    return host  # 如果解析失败，返回原始域名
 
-    const cmd = msg[offset];
-    if (cmd !== 0x01) return false;
-    offset += 1;
-    const atyp = msg[offset];
-    offset += 1;
-    let host, port;
-    if (atyp === 0x01) {
-      host = msg.slice(offset, offset + 4).join('.');
-      offset += 4;
-    } else if (atyp === 0x03) {
-      const hostLen = msg[offset];
-      offset += 1;
-      host = msg.slice(offset, offset + hostLen).toString();
-      offset += hostLen;
-    } else if (atyp === 0x04) {
-      host = msg.slice(offset, offset + 16).reduce((s, b, i, a) =>
-        (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), [])
-        .map(b => b.readUInt16BE(0).toString(16)).join(':');
-      offset += 16;
-    } else {
-      return false;
-    }
 
-    port = msg.readUInt16BE(offset);
-    offset += 2;
+# 代理处理 
+class ProxyHandler:
+    def __init__(self, uuid: str):
+        self.uuid = uuid
+        self.uuid_bytes = bytes.fromhex(uuid)
 
-    if (offset < msg.length && msg[offset] === 0x0d && msg[offset + 1] === 0x0a) {
-      offset += 2;
-    }
+    async def handle_vless(self, websocket, first_msg: bytes) -> bool:
+        """处理VLS协议"""
+        try:
+            if len(first_msg) < 18 or first_msg[0] != 0:
+                return False
 
-    if (isBlockedDomain(host)) {
-      ws.close();
-      return false;
-    }
-    const duplex = createWebSocketStream(ws);
-    resolveHost(host)
-      .then(resolvedIP => {
-        net.connect({ host: resolvedIP, port }, function () {
-          if (offset < msg.length) {
-            this.write(msg.slice(offset));
-          }
-          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-        }).on('error', () => { });
-      })
-      .catch(error => {
-        net.connect({ host, port }, function () {
-          if (offset < msg.length) {
-            this.write(msg.slice(offset));
-          }
-          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-        }).on('error', () => { });
-      });
+            # 验证UUID
+            if first_msg[1:17] != self.uuid_bytes:
+                return False
 
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
+            i = first_msg[17] + 19
+            if i + 3 > len(first_msg):
+                return False
 
-// Ws handler
-const wss = new WebSocket.Server({ server: httpServer });
-wss.on('connection', (ws, req) => {
-  const url = req.url || '';
+            port = struct.unpack('!H', first_msg[i:i+2])[0]
+            i += 2
+            atyp = first_msg[i]
+            i += 1
 
-  const expectedPath = `/${WSPATH}`;
-  if (!url.startsWith(expectedPath)) {
-    ws.close();
-    return;
-  }
+            # 解析地址
+            host = ''
+            if atyp == 1:  # IPv4
+                if i + 4 > len(first_msg):
+                    return False
+                host = '.'.join(str(b) for b in first_msg[i:i+4])
+                i += 4
+            elif atyp == 2:  # 域名
+                if i >= len(first_msg):
+                    return False
+                host_len = first_msg[i]
+                i += 1
+                if i + host_len > len(first_msg):
+                    return False
+                host = first_msg[i:i+host_len].decode()
+                i += host_len
+            elif atyp == 3:  # IPv6
+                if i + 16 > len(first_msg):
+                    return False
+                host = ':'.join(f'{(first_msg[j] << 8) + first_msg[j+1]:04x}'
+                              for j in range(i, i+16, 2))
+                i += 16
+            else:
+                return False
 
-  ws.once('message', msg => {
-    // VLE-SS (version byte 0 + 16 bytes UUID)
-    if (msg.length > 17 && msg[0] === 0) {
-      const id = msg.slice(1, 17);
-      const isVless = id.every((v, i) => v == parseInt(uuid.substr(i * 2, 2), 16));
-      if (isVless) {
-        if (!handleVlsConnection(ws, msg)) {
-          ws.close();
-        }
-        return;
-      }
-    }
-    // tro-jan (56 bytes SHA224 hash)
-    if (msg.length >= 58) {
-      if (handleTrojConnection(ws, msg)) {
-        return;
-      }
-    }
+            if is_blocked_domain(host):
+                await websocket.close()
+                return False
 
-    ws.close();
-  }).on('error', () => { });
-});
+            await websocket.send_bytes(bytes([0, 0]))
 
-httpServer.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+            resolved_host = await resolve_host(host)
+
+            try:
+                reader, writer = await asyncio.open_connection(resolved_host, port)
+
+                # 发送剩余数据
+                if i < len(first_msg):
+                    writer.write(first_msg[i:])
+                    await writer.drain()
+
+                # 双向转发
+                async def forward_ws_to_tcp():
+                    try:
+                        async for msg in websocket:
+                            if msg.type == aiohttp.WSMsgType.BINARY:
+                                writer.write(msg.data)
+                                await writer.drain()
+                    except:
+                        pass
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+
+                async def forward_tcp_to_ws():
+                    try:
+                        while True:
+                            data = await reader.read(4096)
+                            if not data:
+                                break
+                            await websocket.send_bytes(data)
+                    except:
+                        pass
+
+                await asyncio.gather(
+                    forward_ws_to_tcp(),
+                    forward_tcp_to_ws()
+                )
+
+            except Exception as e:
+                if DEBUG:
+                    logger.error(f"Connection error: {e}")
+
+            return True
+
+        except Exception as e:
+            if DEBUG:
+                logger.error(f"VLESS handler error: {e}")
+            return False
+
+    async def handle_trojan(self, websocket, first_msg: bytes) -> bool:
+        """处理Tro协议"""
+        try:
+            if len(first_msg) < 58:
+                return False
+
+            received_hash_bytes = first_msg[:56]
+
+            # 验证密码 - 支持标准UUID和无短横线UUID
+            hash_obj1 = hashlib.sha224()
+            hash_obj1.update(self.uuid.encode())
+            expected_hash_hex1 = hash_obj1.hexdigest()
+
+            # 尝试使用标准UUID（带短横线）
+            standard_uuid = UUID
+            hash_obj2 = hashlib.sha224()
+            hash_obj2.update(standard_uuid.encode())
+            expected_hash_hex2 = hash_obj2.hexdigest()
+
+            # 转换为hex字符串进行比较
+            received_hash_hex = received_hash_bytes.decode('ascii', errors='ignore')
+
+            # 检查是否匹配任一UUID格式
+            if received_hash_hex != expected_hash_hex1 and received_hash_hex != expected_hash_hex2:
+                return False
+
+            offset = 56
+            if first_msg[offset:offset+2] == b'\r\n':
+                offset += 2
+
+            cmd = first_msg[offset]
+            if cmd != 1:
+                return False
+            offset += 1
+
+            atyp = first_msg[offset]
+            offset += 1
+
+            # 解析地址
+            host = ''
+            if atyp == 1:  # IPv4
+                host = '.'.join(str(b) for b in first_msg[offset:offset+4])
+                offset += 4
+            elif atyp == 3:  # 域名
+                host_len = first_msg[offset]
+                offset += 1
+                host = first_msg[offset:offset+host_len].decode()
+                offset += host_len
+            elif atyp == 4:  # IPv6
+                host = ':'.join(f'{(first_msg[j] << 8) + first_msg[j+1]:04x}'
+                              for j in range(offset, offset+16, 2))
+                offset += 16
+            else:
+                return False
+
+            port = struct.unpack('!H', first_msg[offset:offset+2])[0]
+            offset += 2
+
+            if first_msg[offset:offset+2] == b'\r\n':
+                offset += 2
+
+            if is_blocked_domain(host):
+                await websocket.close()
+                return False
+
+            # 连接目标
+            resolved_host = await resolve_host(host)
+
+            try:
+                reader, writer = await asyncio.open_connection(resolved_host, port)
+
+                if offset < len(first_msg):
+                    writer.write(first_msg[offset:])
+                    await writer.drain()
+
+                async def forward_ws_to_tcp():
+                    try:
+                        async for msg in websocket:
+                            if msg.type == aiohttp.WSMsgType.BINARY:
+                                writer.write(msg.data)
+                                await writer.drain()
+                    except:
+                        pass
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+
+                async def forward_tcp_to_ws():
+                    try:
+                        while True:
+                            data = await reader.read(4096)
+                            if not data:
+                                break
+                            await websocket.send_bytes(data)
+                    except:
+                        pass
+
+                await asyncio.gather(
+                    forward_ws_to_tcp(),
+                    forward_tcp_to_ws()
+                )
+
+            except Exception as e:
+                if DEBUG:
+                    logger.error(f"Connection error: {e}")
+
+            return True
+
+        except Exception as e:
+            if DEBUG:
+                logger.error(f"Tro handler error: {e}")
+            return False
+
+
+# HTTP/WebSocket 处理 
+async def websocket_handler(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    CUUID = UUID.replace('-', '')
+    path = request.path
+
+    if f'/{WSPATH}' not in path:
+        await ws.close()
+        return ws
+
+    proxy = ProxyHandler(CUUID)
+
+    try:
+        first_msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        if first_msg.type != aiohttp.WSMsgType.BINARY:
+            await ws.close()
+            return ws
+
+        msg_data = first_msg.data
+
+        # 尝试VLS
+        if len(msg_data) > 17 and msg_data[0] == 0:
+            if await proxy.handle_vless(ws, msg_data):
+                return ws
+
+        # 尝试Tro
+        if len(msg_data) >= 58:
+            if await proxy.handle_trojan(ws, msg_data):
+                return ws
+
+        await ws.close()
+
+    except asyncio.TimeoutError:
+        await ws.close()
+    except Exception as e:
+        if DEBUG:
+            logger.error(f"WebSocket handler error: {e}")
+        await ws.close()
+
+    return ws
+
+async def http_handler(request):
+    if request.path == '/':
+        try:
+            with open('index.html', 'r', encoding='utf-8') as f:
+                content = f.read()
+            return web.Response(text=content, content_type='text/html')
+        except:
+            return web.Response(text='Hello world!', content_type='text/html')
+
+    elif request.path == f'/{SUB_PATH}':
+        await get_isp()
+        await get_ip()
+
+        name_part = f"{NAME}-{ISP}" if NAME else ISP
+        tls_param = 'tls' if Tls == 'tls' else 'none'
+
+        # 生成配置链接
+        vless_url = f"vless://{UUID}@{CurrentDomain}:{CurrentPort}?encryption=none&security={tls_param}&sni={CurrentDomain}&fp=chrome&type=ws&host={CurrentDomain}&path=%2F{WSPATH}#{name_part}"
+        trojan_url = f"trojan://{UUID}@{CurrentDomain}:{CurrentPort}?security={tls_param}&sni={CurrentDomain}&fp=chrome&type=ws&host={CurrentDomain}&path=%2F{WSPATH}#{name_part}"
+
+        subscription = f"{vless_url}\n{trojan_url}"
+        base64_content = base64.b64encode(subscription.encode()).decode()
+
+        return web.Response(text=base64_content + '\n', content_type='text/plain')
+
+    return web.Response(status=404, text='Not Found\n')
+
+
+# 主函数
+async def main():
+    app = web.Application()
+
+    # 路由
+    app.router.add_get('/', http_handler)
+    app.router.add_get(f'/{SUB_PATH}', http_handler)
+    app.router.add_get(f'/{WSPATH}', websocket_handler)
+
+    # 启动服务
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, None, PORT)
+    await site.start()
+    await get_ip()
+    logger.info(f"✅ server is running on port {PORT}")
+
+    try:
+        await asyncio.Future()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        await runner.cleanup()
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nServer stopped by user")
